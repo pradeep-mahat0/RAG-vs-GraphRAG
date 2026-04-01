@@ -1,0 +1,34 @@
+# Environment
+.env
+*.env
+
+# Persistent stores (generated at runtime)
+rag_store/
+graph_store/
+eval_store/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Transcripts / media
+*.srt
+*.mp3
+*.mp4
+
+# Notebooks
+.ipynb_checkpoints/

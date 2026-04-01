@@ -1,0 +1,18 @@
+# GraphRAG Evaluation — Additional Dependencies
+# Install on top of GraphRAG/requirements.txt:
+#   pip install -r eval_requirements.txt
+
+# RAGAS — RAG evaluation framework
+ragas>=0.2.0
+
+# LangChain LLM wrappers (required by RAGAS)
+langchain-openai>=0.2.0
+
+# For Groq provider (optional — only needed if using Groq)
+langchain-groq>=0.2.0
+
+# Plotting for eval dashboard
+plotly>=5.18.0
+
+# datasets library (used internally by RAGAS)
+datasets>=2.18.0
