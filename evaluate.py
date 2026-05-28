@@ -133,6 +133,20 @@ def call_llm(prompt: str, provider: str, api_key: str, max_tokens: int = 400) ->
             messages=[{"role": "user", "content": prompt}],
             max_tokens=max_tokens, temperature=0.1,
         )
+        return resp.choices[0].message.content.strip()
+    elif provider == "gemini":
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=api_key)
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                max_output_tokens=max_tokens,
+                temperature=0.1,
+            )
+        )
+        return resp.text.strip()
     else:
         from openai import OpenAI
         resp = OpenAI(api_key=api_key).chat.completions.create(
@@ -140,7 +154,7 @@ def call_llm(prompt: str, provider: str, api_key: str, max_tokens: int = 400) ->
             messages=[{"role": "user", "content": prompt}],
             max_tokens=max_tokens, temperature=0.1,
         )
-    return resp.choices[0].message.content.strip()
+        return resp.choices[0].message.content.strip()
 
 
 def generate_answer(question: str, context: str, mode: str,
@@ -172,6 +186,7 @@ ANSWER:"""
 
 def setup_graphrag(llm_fn: Callable, progress_fn: Optional[Callable] = None):
     from graph_pipeline import GraphRAG
+    import glob
 
     grag = GraphRAG(persist_dir=str(EVAL_STORE / "graph_rag_store"))
 
@@ -181,10 +196,48 @@ def setup_graphrag(llm_fn: Callable, progress_fn: Optional[Callable] = None):
             grag._cache_summary_embeddings()
         return grag
 
-    for path in TRANSCRIPT_PATHS:
-        if not Path(path).exists():
-            raise FileNotFoundError(f"Transcript not found: {path}")
-        if progress_fn: progress_fn(f"Ingesting: {Path(path).stem[:50]}...")
+    # Match transcripts dynamically in the ROOT directory
+    all_files = glob.glob(str(ROOT / "*.srt")) + glob.glob(str(ROOT / "*.txt"))
+    resolved_paths = []
+    
+    # Define keywords to match each transcript
+    keywords_map = {
+        "Jensen Huang": ["jensen", "huang", "nvidia", "494"],
+        "Sam Altman": ["altman", "openai", "gpt-5", "419", "future"],
+        "Elon Musk": ["elon", "musk", "war", "aliens", "400"]
+    }
+    
+    for speaker, keywords in keywords_map.items():
+        matched = False
+        # Try to find a matching file in the root
+        for f in all_files:
+            fname = os.path.basename(f).lower()
+            if any(kw in fname for kw in keywords):
+                resolved_paths.append(f)
+                matched = True
+                if progress_fn: progress_fn(f"Matched transcript for {speaker}: {os.path.basename(f)}")
+                break
+        
+        # If no match in root, check if the default filename in TRANSCRIPT_PATHS exists
+        if not matched:
+            for default_path in TRANSCRIPT_PATHS:
+                default_fname = os.path.basename(default_path).lower()
+                if any(kw in default_fname for kw in keywords) and Path(default_path).exists():
+                    resolved_paths.append(default_path)
+                    matched = True
+                    if progress_fn: progress_fn(f"Found default transcript for {speaker}")
+                    break
+            
+        if not matched:
+            if progress_fn: progress_fn(f"⚠️ Warning: Transcript for {speaker} not found in root directory. Skipping from evaluation dataset.")
+
+    if not resolved_paths:
+        raise FileNotFoundError(
+            f"No transcripts found in {ROOT}. Please place at least one podcast transcript (.srt or .txt) in the directory."
+        )
+
+    for path in resolved_paths:
+        if progress_fn: progress_fn(f"Ingesting: {Path(path).name[:50]}...")
         grag.ingest(path, llm_fn=llm_fn)
 
     return grag
@@ -315,7 +368,7 @@ REFERENCE ANSWER:"""
         gt[q["id"]] = call_llm(prompt, provider, api_key, max_tokens=500)
         time.sleep(0.5)
 
-    path.write_text(json.dumps(gt, indent=2, ensure_ascii=False))
+    path.write_text(json.dumps(gt, indent=2, ensure_ascii=False), encoding="utf-8")
     return gt
 
 
@@ -339,6 +392,16 @@ def score_with_ragas(samples: list, provider: str, api_key: str) -> dict:
         ragas_llm = LangchainLLMWrapper(
             ChatGroq(model="llama-3.3-70b-versatile", api_key=api_key)
         )
+    elif provider == "gemini":
+        from langchain_openai import ChatOpenAI
+        ragas_llm = LangchainLLMWrapper(
+            ChatOpenAI(
+                model="gemini-2.5-flash",
+                openai_api_key=api_key,
+                openai_api_base="https://generativelanguage.googleapis.com/v1beta/openai/",
+                temperature=0
+            )
+        )
     else:
         from langchain_openai import ChatOpenAI
         ragas_llm = LangchainLLMWrapper(
@@ -349,7 +412,16 @@ def score_with_ragas(samples: list, provider: str, api_key: str) -> dict:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             from langchain_openai import OpenAIEmbeddings
-        ragas_emb = LangchainEmbeddingsWrapper(OpenAIEmbeddings(api_key=api_key))
+        if provider == "gemini":
+            ragas_emb = LangchainEmbeddingsWrapper(
+                OpenAIEmbeddings(
+                    model="text-embedding-004",
+                    openai_api_key=api_key,
+                    openai_api_base="https://generativelanguage.googleapis.com/v1beta/openai/"
+                )
+            )
+        else:
+            ragas_emb = LangchainEmbeddingsWrapper(OpenAIEmbeddings(api_key=api_key))
     except Exception:
         from langchain_community.embeddings import HuggingFaceEmbeddings
         ragas_emb = LangchainEmbeddingsWrapper(
@@ -442,14 +514,14 @@ def run_evaluation(provider: str, api_key: str,
         "metadata": {
             "provider": provider,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "transcripts": [Path(p).stem for p in TRANSCRIPT_PATHS],
+            "transcripts": list(grag._ingested_sources.keys()) if hasattr(grag, "_ingested_sources") else [Path(p).stem for p in TRANSCRIPT_PATHS],
             "n_questions": len(TEST_QUESTIONS),
         },
         "questions": TEST_QUESTIONS,
         "results":   scored,
     }
     out_path = EVAL_STORE / "results.json"
-    out_path.write_text(json.dumps(output, indent=2, ensure_ascii=False))
+    out_path.write_text(json.dumps(output, indent=2, ensure_ascii=False), encoding="utf-8")
     log(f"Results saved → {out_path}")
     return output
 
@@ -458,12 +530,14 @@ def run_evaluation(provider: str, api_key: str,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--provider", choices=["openai", "groq"], default="openai")
+    parser.add_argument("--provider", choices=["openai", "groq", "gemini"], default="gemini")
     parser.add_argument("--api_key",  default=None)
     args = parser.parse_args()
 
     key = args.api_key or (
-        os.getenv("OPENAI_API_KEY") if args.provider == "openai" else os.getenv("GROQ_API_KEY")
+        os.getenv("OPENAI_API_KEY") if args.provider == "openai" else (
+            os.getenv("GEMINI_API_KEY") if args.provider == "gemini" else os.getenv("GROQ_API_KEY")
+        )
     )
     if not key:
         print(f"Error: set --api_key or {args.provider.upper()}_API_KEY"); sys.exit(1)

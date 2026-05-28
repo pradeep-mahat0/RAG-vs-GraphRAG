@@ -5,6 +5,7 @@ Run: streamlit run app.py
 
 import os
 import uuid
+import tempfile
 import streamlit as st
 from pathlib import Path
 from dotenv import load_dotenv
@@ -69,9 +70,9 @@ def init_state():
         "ingested":          False,
         "ingest_stats_list": [],
         "active_sources":    [],
-        "api_key":           os.getenv("OPENAI_API_KEY", "") or os.getenv("GROQ_API_KEY", ""),
-        "provider":          "openai",
-        "persist_dir":       f"/tmp/rag_store_{uuid.uuid4().hex}",
+        "api_key":           os.getenv("GEMINI_API_KEY", "") or os.getenv("GROQ_API_KEY", "") or os.getenv("OPENAI_API_KEY", ""),
+        "provider":          "gemini",
+        "persist_dir":       str(Path(tempfile.gettempdir()) / f"rag_store_{uuid.uuid4().hex}"),
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -116,6 +117,32 @@ TRANSCRIPT EXCERPTS:
         )
         return response.choices[0].message.content
 
+    elif provider == "gemini":
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=api_key)
+        
+        gemini_messages = []
+        for msg in full_messages:
+            role = "user" if msg["role"] == "user" else "model"
+            gemini_messages.append(
+                types.Content(
+                    role=role,
+                    parts=[types.Part(text=msg["content"])]
+                )
+            )
+            
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=gemini_messages,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.3,
+                max_output_tokens=1024,
+            )
+        )
+        return response.text
+
     else:  # openai
         from openai import OpenAI
         client   = OpenAI(api_key=api_key)
@@ -133,12 +160,17 @@ with st.sidebar:
     st.markdown("## ⚙️ Configuration")
 
     st.session_state.provider = st.selectbox(
-        "LLM Provider", ["openai", "groq"],
-        index=0 if st.session_state.provider == "openai" else 1,
-        help="OpenAI gpt-4o-mini or Groq llama-3.3-70b (free & fast)."
+        "LLM Provider", ["gemini", "openai", "groq"],
+        index=["gemini", "openai", "groq"].index(st.session_state.provider),
+        help="Google Gemini 2.5 Flash, OpenAI gpt-4o-mini, or Groq llama-3.3-70b."
     )
 
-    api_key_label = "OpenAI API Key" if st.session_state.provider == "openai" else "Groq API Key"
+    api_key_label = {
+        "gemini": "Gemini API Key",
+        "openai": "OpenAI API Key",
+        "groq": "Groq API Key"
+    }[st.session_state.provider]
+    
     api_key_input = st.text_input(
         api_key_label, value=st.session_state.api_key,
         type="password", placeholder="Enter your API key..."
@@ -189,13 +221,15 @@ with st.sidebar:
             for i, uf in enumerate(pending):
                 progress.progress((i + 0.5) / len(pending), text=f"Processing: {uf.name}")
                 # Use UUID to avoid temp file conflicts between concurrent sessions
-                tmp_path = Path(f"/tmp/{uuid.uuid4().hex}_{uf.name}")
+                tmp_path = Path(tempfile.gettempdir()) / f"{uuid.uuid4().hex}_{uf.name}"
                 try:
                     tmp_path.write_bytes(uf.getvalue())
                     stats = st.session_state.rag.ingest(str(tmp_path))
                     new_stats.append(stats)
                 except Exception as e:
                     st.error(f"❌ Error processing {uf.name}: {e}")
+                    st.exception(e)
+                    st.stop()
                 finally:
                     tmp_path.unlink(missing_ok=True)  # clean up tmp file
 
@@ -242,7 +276,7 @@ with st.sidebar:
         st.session_state.ingested          = False
         st.session_state.ingest_stats_list = []
         st.session_state.active_sources    = []
-        st.session_state.persist_dir       = f"/tmp/rag_store_{uuid.uuid4().hex}"
+        st.session_state.persist_dir       = str(Path(tempfile.gettempdir()) / f"rag_store_{uuid.uuid4().hex}")
         st.rerun()
 
 

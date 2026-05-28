@@ -56,9 +56,15 @@ class TextChunk:
 # ─── SRT Helpers ──────────────────────────────────────────────────────────────
 
 def parse_srt(file_path: str) -> List[SRTBlock]:
-    content    = Path(file_path).read_text(encoding="utf-8", errors="replace")
+    """Parse .srt file into structured blocks, falling back to plain text parsing if not valid SRT."""
+    content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+    
+    # Normalize Windows/Mac line endings to Unix style for consistent splitting
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+    
+    # Try parsing as standard SRT first
     raw_blocks = re.split(r"\n\s*\n", content.strip())
-    blocks     = []
+    blocks = []
     for raw in raw_blocks:
         lines = raw.strip().splitlines()
         if len(lines) < 3:
@@ -79,6 +85,21 @@ def parse_srt(file_path: str) -> List[SRTBlock]:
             end_time=m.group(2).replace(",", "."),
             text=" ".join(lines[2:]).strip()
         ))
+
+    # If no valid SRT blocks were parsed, fallback to plain text parsing (e.g., for standard .txt transcripts)
+    if not blocks:
+        paragraphs = re.split(r"\n\s*\n", content.strip())
+        for idx, para in enumerate(paragraphs, 1):
+            text = para.strip()
+            if len(text) < 3:
+                continue
+            blocks.append(SRTBlock(
+                index=idx,
+                start_time="00:00:00.000",
+                end_time="00:00:00.000",
+                text=text
+            ))
+
     return blocks
 
 
@@ -175,32 +196,70 @@ def chunk_segments(segments: list, chunk_size=500, overlap=80, source_name="podc
 # ─── Vector Store ─────────────────────────────────────────────────────────────
 
 class VectorStore:
-    def __init__(self, persist_dir: str = "./chroma_db", collection_name: str = "graphrag"):
+    def __init__(self, persist_dir: str = "./chroma_db", collection_name: str = "graphrag_gemini"):
         import chromadb
         self.client          = chromadb.PersistentClient(path=persist_dir)
         self.collection_name = collection_name
-        self._embedder       = None
 
-    def _get_embedder(self):
-        if self._embedder is None:
-            from sentence_transformers import SentenceTransformer
-            print("Loading embedding model...")
-            self._embedder = SentenceTransformer("BAAI/bge-small-en-v1.5")
-        return self._embedder
+    def _get_api_key(self) -> str:
+        # 1. Try env variable
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            # 2. Try Streamlit session state if running inside dashboard
+            try:
+                import streamlit as st
+                if "api_key" in st.session_state and st.session_state.api_key:
+                    api_key = st.session_state.api_key
+            except ImportError:
+                pass
+        if not api_key:
+            raise ValueError(
+                "GEMINI_API_KEY is not set. Please set the GEMINI_API_KEY environment variable "
+                "or configure it in your Streamlit dashboard sidebar."
+            )
+        return api_key
 
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
         if not texts:
             return []
-        model    = self._get_embedder()
-        prefixed = [f"Represent this sentence for searching relevant passages: {t}" for t in texts]
-        return model.encode(prefixed, batch_size=32, show_progress_bar=False, normalize_embeddings=True).tolist()
+        
+        api_key = self._get_api_key()
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        
+        # Sanitize whitespace/empty entries to prevent Gemini API errors
+        sanitized = [t if (t and t.strip()) else " " for t in texts]
+        
+        # Batch requests in blocks of at most 100 to respect strict Gemini API constraints
+        batch_size = 100
+        embeddings = []
+        
+        for i in range(0, len(sanitized), batch_size):
+            batch = sanitized[i : i + batch_size]
+            response = client.models.embed_content(
+                model="gemini-embedding-001",
+                contents=batch
+            )
+            if response and response.embeddings:
+                embeddings.extend([emb.values for emb in response.embeddings])
+            else:
+                raise ValueError("Gemini API call returned empty embeddings response.")
+                
+        return embeddings
 
     def embed_query(self, query: str) -> List[float]:
-        model = self._get_embedder()
-        return model.encode(
-            f"Represent this question for searching relevant passages: {query}",
-            normalize_embeddings=True
-        ).tolist()
+        api_key = self._get_api_key()
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        
+        sanitized = query if (query and query.strip()) else " "
+        response = client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=sanitized
+        )
+        if response and response.embeddings:
+            return response.embeddings[0].values
+        raise ValueError("Gemini API query embedding call returned empty response.")
 
     def index_chunks(self, chunks: List[TextChunk], source_id: str):
         if not chunks:
@@ -357,7 +416,7 @@ class GraphRAG:
               f"top_k={top_k_retrieve}, top_n={top_n_rerank}")
 
         self.vector_store = VectorStore(
-            persist_dir=str(self.persist_dir / "chroma"), collection_name="graphrag"
+            persist_dir=str(self.persist_dir / "chroma"), collection_name="graphrag_gemini"
         )
         self.bm25_index   = BM25Index()
         self.reranker     = Reranker()

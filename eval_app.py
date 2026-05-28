@@ -79,8 +79,13 @@ METRIC_EXPLAINERS = {
 
 with st.sidebar:
     st.markdown("## ⚙️ Configuration")
-    provider = st.selectbox("LLM Provider", ["openai", "groq"])
-    env_key  = os.getenv("OPENAI_API_KEY" if provider == "openai" else "GROQ_API_KEY", "")
+    provider = st.selectbox("LLM Provider", ["gemini", "groq", "openai"])
+    env_key  = os.getenv(
+        "GEMINI_API_KEY" if provider == "gemini" else (
+            "OPENAI_API_KEY" if provider == "openai" else "GROQ_API_KEY"
+        ),
+        ""
+    )
     api_key  = st.text_input(
         "API Key", value=env_key, type="password",
         placeholder="Loaded from .env" if env_key else "Enter API key...",
